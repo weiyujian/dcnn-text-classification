@@ -17,7 +17,8 @@ class TextCNN(object):
         self.dropout_keep_prob = tf.placeholder(tf.float32, name="dropout_keep_prob")
         self.is_training = tf.placeholder(tf.bool, name="is_training")
         self.use_region_emb = False
-        self.fc_hidden_size = 2048 
+        self.fc_hidden_size = 2048
+        self.use_dialate_conv =  False
         # Keeping track of l2 regularization loss (optional)
         l2_loss = tf.constant(0.0)
 
@@ -37,20 +38,33 @@ class TextCNN(object):
             self.embedded_chars_expanded = tf.expand_dims(self.embedded_chars, -1)
 
         # Create a dcnn + dynamic k max pooling layer
-        with tf.name_scope("dialate_conv"):
-            #first layer
-            W1 = tf.Variable(tf.truncated_normal([filter_sizes[0], 2, 1, num_filters[0]], stddev=0.1), name="W1")
-            b1 = tf.Variable(tf.constant(0.1, shape=[num_filters[0]]), name="b1")
-            conv1 = self.dialate_conv_layer(self.embedded_chars_expanded, W1, b1, rate=2, scope="dialate_conv_1")
-            conv_bn1 = tf.layers.batch_normalization(conv1, training=self.is_training)
-            pooled1 = self.folding_k_max_pooling(conv_bn1, k1)
+        with tf.name_scope("conv_pooling_layer"):
+            if self.use_dialate_conv:
+                #first layer
+                W1 = tf.Variable(tf.truncated_normal([filter_sizes[0], 2, 1, num_filters[0]], stddev=0.1), name="W1")
+                b1 = tf.Variable(tf.constant(0.1, shape=[num_filters[0]]), name="b1")
+                conv1 = self.dialate_conv_layer(self.embedded_chars_expanded, W1, b1, rate=2, scope="dialate_conv_1")
+                conv_bn1 = tf.layers.batch_normalization(conv1, training=self.is_training)
+                pooled1 = self.folding_k_max_pooling(conv_bn1, k1)
             
-            #second layer
-            W2 = tf.Variable(tf.truncated_normal([filter_sizes[1], 3, num_filters[0], num_filters[1]], stddev=0.1), name="W2")
-            b2 = tf.Variable(tf.constant(0.1, shape=[num_filters[1]]), name="b2")
-            conv2 = self.dialate_conv_layer(pooled1, W2, b2, rate=2, scope="dialate_conv_2")
-            conv_bn2 = tf.layers.batch_normalization(conv2, training=self.is_training)
-            pooled2 = self.folding_k_max_pooling(conv_bn2, top_k)
+                #second layer
+                W2 = tf.Variable(tf.truncated_normal([filter_sizes[1], 3, num_filters[0], num_filters[1]], stddev=0.1), name="W2")
+                b2 = tf.Variable(tf.constant(0.1, shape=[num_filters[1]]), name="b2")
+                conv2 = self.dialate_conv_layer(pooled1, W2, b2, rate=2, scope="dialate_conv_2")
+                conv_bn2 = tf.layers.batch_normalization(conv2, training=self.is_training)
+                pooled2 = self.folding_k_max_pooling(conv_bn2, top_k)
+            else:
+                W1 = tf.Variable(tf.truncated_normal([filter_sizes[0], embedding_size, 1, num_filters[0]], stddev=0.1), name="W1")
+                b1 = tf.Variable(tf.constant(0.1, shape=[num_filters[0], embedding_size]), name="b1")
+                conv1 = self.conv1d_layer(self.embedded_chars_expanded, W1, b1, scope="conv1d_1")
+                conv_bn1 = tf.layers.batch_normalization(conv1, training=self.is_training)
+                pooled1 = self.folding_k_max_pooling(conv_bn1, k1)
+
+                W2 = tf.Variable(tf.truncated_normal([filter_sizes[1], embedding_size, num_filters[0], num_filters[1]], stddev=0.1), name="W2")
+                b2 = tf.Variable(tf.constant(0.1, shape=[num_filters[1], embedding_size]), name="b2")
+                conv2 = self.conv1d_layer(pooled1, W2, b2, scope="conv1d_2")
+                conv_bn2 = tf.layers.batch_normalization(conv2, training=self.is_training)
+                pooled2 = self.folding_k_max_pooling(conv_bn2, top_k)
 
         # Combine all the pooled features
         num_filters_total = int(pooled2.get_shape()[1] * pooled2.get_shape()[2] * pooled2.get_shape()[3])
@@ -169,3 +183,22 @@ class TextCNN(object):
         """
         conv = tf.nn.atrous_conv2d(x, w, rate, padding='SAME', name=scope)
         return tf.nn.relu(tf.nn.bias_add(conv, b), name="relu")
+    
+    def conv1d_layer(self, x, w, b, scope="conv_1d"):
+        """dialte conv
+            x: batch_size, seq_len, emb_size, in_channels
+            w: filter_height, filter_width, in_channels, out_channels
+            return : if valid: batch, height - filter_width + 1, width, out_channels
+            if same: batch, height, width, out_channels
+        """
+        input_unstack = tf.unstack(x, axis=2)
+        w_unstack = tf.unstack(w, axis=1)
+        b_unstack = tf.unstack(b, axis=1)
+        conv1d = []
+        with tf.name_scope(scope):
+            for i in range(len(input_unstack)):
+                conv = tf.nn.conv1d(input_unstack[i], w_unstack[i], stride=1, padding="SAME")
+                conv = tf.nn.relu(tf.nn.bias_add(conv, b_unstack[i]), name="relu")
+                conv1d.append(conv)
+            final_conv = tf.stack(conv1d, axis=2)
+        return final_conv
